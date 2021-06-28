@@ -15,6 +15,8 @@ from ..log import get_module_logger
 from ..utils import flatten_dict
 from ..contrib.eva.alpha import calc_ic, calc_long_short_return, calc_long_short_prec
 from ..contrib.strategy.strategy import BaseStrategy
+from flask import Flask
+import pika
 
 logger = get_module_logger("workflow", logging.INFO)
 
@@ -124,6 +126,7 @@ class SignalRecord(RecordTemp):
     def generate(self, **kwargs):
         # generate prediciton
         pred = self.model.predict(self.dataset)
+        pred.to_csv("~/Downloads/pred_scores.csv")
         if isinstance(pred, pd.Series):
             pred = pred.to_frame("score")
         self.recorder.save_objects(**{"pred.pkl": pred})
@@ -175,6 +178,7 @@ class HFSignalRecord(SignalRecord):
 
     def __init__(self, recorder, **kwargs):
         super().__init__(recorder=recorder)
+ 
 
     def generate(self):
         pred = self.load("pred.pkl")
@@ -218,6 +222,9 @@ class HFSignalRecord(SignalRecord):
             self.get_path("long_avg_r.pkl"),
         ]
         return paths
+    
+
+        
 
 
 class SigAnaRecord(SignalRecord):
@@ -302,6 +309,12 @@ class PortAnaRecord(SignalRecord):
         self.strategy_config = config["strategy"]
         self.backtest_config = config["backtest"]
         self.strategy = init_instance_by_config(self.strategy_config, accept_types=BaseStrategy)
+        self.connection = pika.BlockingConnection(
+                                pika.ConnectionParameters(host='localhost'))
+        self.channel = self.connection.channel()
+        self.channel.queue_declare(queue='rpc_queue')
+        self.channel.basic_qos(prefetch_count=1)
+        self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.rpc_on_request)
 
     def generate(self, **kwargs):
         # check previously stored prediction results
@@ -357,3 +370,78 @@ class PortAnaRecord(SignalRecord):
             PortAnaRecord.get_path("positions_normal.pkl"),
             PortAnaRecord.get_path("port_analysis.pkl"),
         ]
+
+    def start_rpc_consumer(self):
+        print(" [x] Awaiting RPC requests")
+        self.channel.start_consuming()  
+    
+    def rpc_on_request(self, ch, method, props, body):
+        response = fib(n)
+        ch.basic_publish(exchange='',
+                        routing_key=props.reply_to,
+                        properties=pika.BasicProperties(correlation_id = \
+                                                            props.correlation_id),
+                        body=str(response))
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        raise NotImplementedError
+    
+    def on_request(ch, method, props, body):
+        n = int(body)
+        print(" [.] fib(%s)" % n)
+
+class HFPortAnaRecord(SignalRecord):
+    """
+    This is the Portfolio Analysis Record class that generates the analysis results such as those of backtest. This class inherits the ``RecordTemp`` class.
+
+    The following files will be stored in recorder
+    - report_normal.pkl & positions_normal.pkl:
+        - The return report and detailed positions of the backtest, returned by `qlib/contrib/evaluate.py:backtest`
+    - port_analysis.pkl : The risk analysis of your portfolio, returned by `qlib/contrib/evaluate.py:risk_analysis`
+    """
+
+    artifact_path = "portfolio_analysis"
+
+    def __init__(self, model, dataset, recorder, config, **kwargs):
+        """
+        config["strategy"] : dict
+            define the strategy class as well as the kwargs.
+        config["backtest"] : dict
+            define the backtest kwargs.
+        """
+        super().__init__(recorder=recorder, **kwargs)
+        self.model = model
+        self.dataset = dataset
+
+        self.strategy_config = config["strategy"]
+        self.backtest_config = config["backtest"]
+        self.strategy = init_instance_by_config(self.strategy_config, accept_types=BaseStrategy)
+        self.connection = pika.BlockingConnection(
+                                pika.ConnectionParameters(host='localhost'))
+        self.channel = self.connection.channel()
+        self.channel.queue_declare(queue='rpc_queue')
+        self.channel.basic_qos(prefetch_count=1)
+        self.channel.basic_consume(queue='rpc_queue', on_message_callback=self.rpc_on_request)
+
+    def generate(self, **kwargs):
+        # spin up the rabbitmq server to receive prediction requests
+        self.start_rpc_consumer()
+
+    def list(self):
+        return [
+            PortAnaRecord.get_path("report_normal.pkl"),
+            PortAnaRecord.get_path("positions_normal.pkl"),
+            PortAnaRecord.get_path("port_analysis.pkl"),
+        ]
+
+    def start_rpc_consumer(self):
+        print(" [x] Awaiting RPC requests")
+        self.channel.start_consuming()  
+    
+    def rpc_on_request(self, ch, method, props, body):
+        response = self.model.predict(self.dataset)
+        ch.basic_publish(exchange='',
+                        routing_key=props.reply_to,
+                        properties=pika.BasicProperties(correlation_id = \
+                                                            props.correlation_id),
+                        body=str(response))
+        ch.basic_ack(delivery_tag=method.delivery_tag)

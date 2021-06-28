@@ -10,6 +10,10 @@ import numpy as np
 import bisect
 from ...utils import lazy_sort_index
 from .utils import get_level_index
+try:
+    import dolphindb as ddb
+except:
+    print("error: no dolphindb library installed")
 
 
 class Dataset(Serializable):
@@ -235,6 +239,94 @@ class DatasetH(Dataset):
         else:
             raise NotImplementedError(f"This type of input is not supported")
 
+class DolphinDataSource(Dataset):
+
+    def __init__(self, dbconfig: dict = None, segments: dict = None, handler_kwargs: dict = None):
+        db_kwargs = dbconfig
+        segment_kwargs = segments
+        if db_kwargs:
+            if not isinstance(db_kwargs, dict):
+                raise TypeError(f"param db_kwargs must be type dict, not {type(db_kwargs)}")
+            self.db_kwargs = db_kwargs.copy()
+            self.host = self.db_kwargs["host"]
+            self.port = self.db_kwargs["port"]
+            self.username = self.db_kwargs["username"]
+            self.password = self.db_kwargs["password"]
+        if segment_kwargs:
+            if not isinstance(segment_kwargs, dict):
+                if not isinstance(segment_kwargs, dict):
+                    raise TypeError(f"param segment_kwargs must be type dict, not {type(segment_kwargs)}")
+            self.segment_kwargs = segment_kwargs.copy()
+            self.train_range = self.segment_kwargs["train"]
+            self.validation_range = self.segment_kwargs["validation"]
+            self.test_range = self.segment_kwargs["test"]
+        self.setup_data()
+
+    def setup_data(self):
+        self.s = ddb.session()
+        self.s.connect(self.host, self.port)
+        self.s.login(self.username, self.password)
+        query = '''
+        mtable = loadTable("dfs://A_Market_DFS", "A_Market_Table")
+        '''
+        self.s.run(query)
+        self.market_table = self.s.loadTable(tableName="mtable")
+
+    def prepare(self, segment: str = "train") -> object:
+        if segment == "train":
+            query = '''
+            select code, date, open, high, low, price 
+            from {} 
+            where code in ["SZ000732", "SZ002632", "SZ002923", "SZ300009"], date >= {}, date <= {}
+            '''.format(self.market_table.tableName(), self.train_range[0], self.train_range[1])
+            train = self.s.run(query)
+            ran_floats = [round(np.random.uniform(-1, 1), 2) for _ in range(len(train))]
+            train["LABEL0"] = ran_floats
+            train = train.groupby(["code", "date"]).tail(1).reset_index(drop=True)
+            train = train.rename(columns={"code": "instrument", "date": "datetime"})
+            train = train[["datetime", "instrument", "open", "high", "low", "price", "LABEL0"]]
+            train = train.set_index(["datetime", "instrument"])
+            tuples = zip(["feature", "feature", "feature", "feature", "label"], ["open", "high", "low", "price", "LABEL0"])
+            index = pd.MultiIndex.from_tuples(tuples)
+            train.columns = index
+            return train
+        elif segment == "validation":
+            query = '''
+            select code, date, open, high, low, price 
+            from {} 
+            where code in ["SZ000732", "SZ002632", "002923", "300009"], date >= {}, date <= {}
+            '''.format(self.market_table.tableName(), self.validation_range[0], self.validation_range[1])
+            validation = self.s.run(query)
+
+            ran_floats = [round(np.random.uniform(-1, 1), 2) for _ in range(len(validation))]
+            validation["LABEL0"] = ran_floats
+            validation = validation.groupby(["code", "date"]).tail(1).reset_index(drop=True)
+            validation = validation.rename(columns={"code": "instrument", "date": "datetime"})
+            validation = validation[["datetime", "instrument", "open", "high", "low", "price", "LABEL0"]]
+            validation = validation.set_index(["datetime", "instrument"])
+            tuples = zip(["feature", "feature", "feature", "feature", "label"], ["open", "high", "low", "price", "LABEL0"])
+            index = pd.MultiIndex.from_tuples(tuples)
+            validation.columns = index
+            return validation
+        elif segment == "test":
+            query = '''
+            select code, date, open, high, low, price 
+            from {} 
+            where code in ["SZ000732", "SZ002632", "002923", "300009"], date >= {}, date <= {}
+            '''.format(self.market_table.tableName(), self.test_range[0], self.test_range[1])
+            test = self.s.run(query)
+            ran_floats = [round(np.random.uniform(-1, 1), 2) for _ in range(len(test))]
+            test["LABEL0"] = ran_floats
+            test = test.groupby(["code", "date"]).tail(1).reset_index(drop=True)
+            test = test.rename(columns={"code": "instrument", "date": "datetime"})
+            test = test[["datetime", "instrument", "open", "high", "low", "price", "LABEL0"]]
+            test = test.set_index(["datetime", "instrument"])
+            tuples = zip(["feature", "feature", "feature", "feature", "label"], ["open", "high", "low", "price", "LABEL0"])
+            index = pd.MultiIndex.from_tuples(tuples)
+            test.columns = index
+            return test
+        else:
+            raise TypeError("segments other than train, validation and test are not supported")
 
 class TSDataSampler:
     """
